@@ -32,6 +32,8 @@ struct BenchmarkResult {
     double avg_latency_ns;
     long voluntary_ctx_switches;
     long involuntary_ctx_switches;
+    double user_cpu_sec;
+    double sys_cpu_sec;
 };
 
 template <typename QueueType>
@@ -98,6 +100,11 @@ BenchmarkResult run_1sec_benchmark(const std::string& name) {
     long vol_switches = rusage_end.ru_nvcsw - rusage_start.ru_nvcsw;
     long invol_switches = rusage_end.ru_nivcsw - rusage_start.ru_nivcsw;
 
+    double user_cpu = (rusage_end.ru_utime.tv_sec - rusage_start.ru_utime.tv_sec) +
+                      (rusage_end.ru_utime.tv_usec - rusage_start.ru_utime.tv_usec) / 1e6;
+    double sys_cpu  = (rusage_end.ru_stime.tv_sec - rusage_start.ru_stime.tv_sec) +
+                      (rusage_end.ru_stime.tv_usec - rusage_start.ru_stime.tv_usec) / 1e6;
+
     return BenchmarkResult{
         name,
         elapsed_sec,
@@ -107,7 +114,9 @@ BenchmarkResult run_1sec_benchmark(const std::string& name) {
         mb_per_sec,
         avg_latency,
         vol_switches,
-        invol_switches
+        invol_switches,
+        user_cpu,
+        sys_cpu
     };
 }
 
@@ -123,49 +132,68 @@ void print_result(const BenchmarkResult& r) {
     std::cout << "  Bandwidth             : " << r.mb_per_sec << " MB/s ("
               << (r.mb_per_sec / 1024.0) << " GB/s)\n";
     std::cout << "  Avg Latency           : " << r.avg_latency_ns << " ns/op\n";
+    std::cout << "  CPU Time (User / Sys) : " << r.user_cpu_sec << " s / " << r.sys_cpu_sec << " s\n";
     std::cout << "  Voluntary Ctx Switches: " << r.voluntary_ctx_switches << "\n";
     std::cout << "  Involuntary Switches  : " << r.involuntary_ctx_switches << "\n";
 }
 
 int main() {
-    std::cout << "=========================================================\n";
-    std::cout << "    SPSC Queue Locking Strategies Benchmark (1-sec)      \n";
-    std::cout << "    Payload: 64-byte Order struct                        \n";
-    std::cout << "=========================================================\n";
+    std::cout << "========================================================================================\n";
+    std::cout << "         SPSC Queue Comprehensive Benchmark: Locks vs Lock-Free (1-sec)                  \n";
+    std::cout << "         Payload: 64-byte Order struct | Ring Buffer Capacity: 65,536                   \n";
+    std::cout << "========================================================================================\n";
 
     constexpr std::size_t kCapacity = 65536;
-
     std::vector<BenchmarkResult> results;
 
-    // 1. Benchmark with std::mutex
+    // 1. std::mutex
     results.push_back(run_1sec_benchmark<SPSCQueue<Order, std::mutex, kCapacity>>("std::mutex"));
     print_result(results.back());
 
-    // 2. Benchmark with Naive SpinLock (Test-and-Set)
+    // 2. Naive SpinLock (Test-and-Set)
     results.push_back(run_1sec_benchmark<SPSCQueue<Order, SpinLock, kCapacity>>("Naive SpinLock (TAS exchange)"));
     print_result(results.back());
 
-    // 3. Benchmark with TTAS SpinLock (Spin on load before exchange)
+    // 3. TTAS SpinLock (Spin on load)
     results.push_back(run_1sec_benchmark<SPSCQueue<Order, TTASSpinLock, kCapacity>>("TTAS SpinLock (Spin on load)"));
     print_result(results.back());
 
-    std::cout << "\n========================================================================================\n";
-    std::cout << "                                  LOCK COMPARISON SUMMARY                               \n";
-    std::cout << "========================================================================================\n";
-    std::cout << std::left << std::setw(32) << "Strategy"
+    // 4. Lock-Free Naive (False Sharing)
+    results.push_back(run_1sec_benchmark<LockFreeSPSCQueueNaive<Order, kCapacity>>("Lock-Free (False Sharing Bug)"));
+    print_result(results.back());
+
+    // 5. Lock-Free SPSC (atomic head/tail with alignas(64))
+    results.push_back(run_1sec_benchmark<LockFreeSPSCQueue<Order, kCapacity>>("Lock-Free (alignas(64))"));
+    print_result(results.back());
+
+    // 6. Lock-Free SPSC Cached (atomic + shadow cached indices)
+    results.push_back(run_1sec_benchmark<LockFreeSPSCQueueCached<Order, kCapacity>>("Lock-Free (Cached Indices)"));
+    print_result(results.back());
+
+    std::cout << "\n========================================================================================================================\n";
+    std::cout << "                                                  FINAL BENCHMARK SUMMARY                                               \n";
+    std::cout << "========================================================================================================================\n";
+    std::cout << std::left << std::setw(34) << "Architecture / Strategy"
               << std::setw(16) << "Throughput"
               << std::setw(14) << "Bandwidth"
               << std::setw(14) << "Avg Latency"
-              << std::setw(12) << "Invol Ctx" << "\n";
-    std::cout << "----------------------------------------------------------------------------------------\n";
+              << std::setw(13) << "Invol Ctx"
+              << std::setw(14) << "User/Sys CPU"
+              << std::setw(8)  << "Speedup" << "\n";
+    std::cout << "------------------------------------------------------------------------------------------------------------------------\n";
+    double baseline_ops = results.front().ops_per_sec;
     for (const auto& r : results) {
-        std::cout << std::left << std::setw(32) << r.name
-                  << std::setw(10) << (r.ops_per_sec / 1e6) << " Mops/s "
+        double speedup = r.ops_per_sec / baseline_ops;
+        std::string cpu_str = std::to_string(r.user_cpu_sec).substr(0, 4) + "s / " + std::to_string(r.sys_cpu_sec).substr(0, 4) + "s";
+        std::cout << std::left << std::setw(34) << r.name
+                  << std::setw(9) << (r.ops_per_sec / 1e6) << " Mops/s "
                   << std::setw(8) << r.mb_per_sec << " MB/s "
-                  << std::setw(8) << r.avg_latency_ns << " ns "
-                  << std::setw(12) << r.involuntary_ctx_switches << "\n";
+                  << std::setw(8) << r.avg_latency_ns << " ns/op "
+                  << std::setw(13) << r.involuntary_ctx_switches
+                  << std::setw(14) << cpu_str
+                  << std::setw(7) << speedup << "x\n";
     }
-    std::cout << "========================================================================================\n";
+    std::cout << "========================================================================================================================\n";
 
     return 0;
 }

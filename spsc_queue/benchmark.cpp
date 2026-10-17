@@ -4,6 +4,7 @@
 #include <chrono>
 #include <atomic>
 #include <string>
+#include <vector>
 #include <cstdint>
 #include <sys/resource.h>
 #include "spsc_queue.hpp"
@@ -77,12 +78,10 @@ BenchmarkResult run_1sec_benchmark(const std::string& name) {
         }
     });
 
-    // Stabilize threads before starting
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     auto start_time = std::chrono::steady_clock::now();
     start_flag.store(true, std::memory_order_release);
 
-    // Run for 1 second
     std::this_thread::sleep_for(std::chrono::seconds(1));
     stop_flag.store(true, std::memory_order_release);
 
@@ -130,29 +129,43 @@ void print_result(const BenchmarkResult& r) {
 
 int main() {
     std::cout << "=========================================================\n";
-    std::cout << "   Comparing SPSC Queue: std::mutex vs SpinLock (1s)     \n";
-    std::cout << "   Payload: 64-byte Order struct                         \n";
+    std::cout << "    SPSC Queue Locking Strategies Benchmark (1-sec)      \n";
+    std::cout << "    Payload: 64-byte Order struct                        \n";
     std::cout << "=========================================================\n";
 
     constexpr std::size_t kCapacity = 65536;
 
+    std::vector<BenchmarkResult> results;
+
     // 1. Benchmark with std::mutex
-    auto res_mutex = run_1sec_benchmark<SPSCQueue<Order, std::mutex, kCapacity>>("std::mutex");
-    print_result(res_mutex);
+    results.push_back(run_1sec_benchmark<SPSCQueue<Order, std::mutex, kCapacity>>("std::mutex"));
+    print_result(results.back());
 
-    // 2. Benchmark with Naive SpinLock
-    auto res_spin = run_1sec_benchmark<SPSCQueue<Order, SpinLock, kCapacity>>("SpinLock");
-    print_result(res_spin);
+    // 2. Benchmark with Naive SpinLock (Test-and-Set)
+    results.push_back(run_1sec_benchmark<SPSCQueue<Order, SpinLock, kCapacity>>("Naive SpinLock (TAS exchange)"));
+    print_result(results.back());
 
-    std::cout << "\n=========================================================\n";
-    std::cout << "                       SUMMARY                           \n";
-    std::cout << "=========================================================\n";
-    std::cout << " std::mutex Throughput : " << (res_mutex.ops_per_sec / 1e6) << " Mops/sec | Ctx Switches: "
-              << res_mutex.voluntary_ctx_switches << "\n";
-    std::cout << " SpinLock Throughput   : " << (res_spin.ops_per_sec / 1e6) << " Mops/sec | Ctx Switches: "
-              << res_spin.voluntary_ctx_switches << "\n";
-    std::cout << " Speedup with Spinlock : " << (res_spin.ops_per_sec / res_mutex.ops_per_sec) << "x\n";
-    std::cout << "=========================================================\n";
+    // 3. Benchmark with TTAS SpinLock (Spin on load before exchange)
+    results.push_back(run_1sec_benchmark<SPSCQueue<Order, TTASSpinLock, kCapacity>>("TTAS SpinLock (Spin on load)"));
+    print_result(results.back());
+
+    std::cout << "\n========================================================================================\n";
+    std::cout << "                                  LOCK COMPARISON SUMMARY                               \n";
+    std::cout << "========================================================================================\n";
+    std::cout << std::left << std::setw(32) << "Strategy"
+              << std::setw(16) << "Throughput"
+              << std::setw(14) << "Bandwidth"
+              << std::setw(14) << "Avg Latency"
+              << std::setw(12) << "Invol Ctx" << "\n";
+    std::cout << "----------------------------------------------------------------------------------------\n";
+    for (const auto& r : results) {
+        std::cout << std::left << std::setw(32) << r.name
+                  << std::setw(10) << (r.ops_per_sec / 1e6) << " Mops/s "
+                  << std::setw(8) << r.mb_per_sec << " MB/s "
+                  << std::setw(8) << r.avg_latency_ns << " ns "
+                  << std::setw(12) << r.involuntary_ctx_switches << "\n";
+    }
+    std::cout << "========================================================================================\n";
 
     return 0;
 }

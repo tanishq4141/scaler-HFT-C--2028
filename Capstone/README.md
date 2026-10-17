@@ -1,8 +1,8 @@
 # Capstone: Low-Latency Order Book in C++17
 
-**Student Name:** [Your Name]  
-**SST Roll Number:** [Your SST Roll Number]  
-**SST Email:** [Your SST Email]  
+**Student Name:** Tanishq Jain  
+**SST Roll Number:** 10039  
+**SST Email:** tanishq.24bcs10039@sst.scaler.com  
 **Submission Repository:** https://github.com/KnightKnight27/scaler-HFT-C--2028  
 
 ---

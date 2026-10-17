@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <array>
+#include <mutex>
 #include <cstddef>
 #include <cstdint>
 
@@ -22,9 +23,9 @@ public:
     }
 };
 
-// SPSC Queue protected by a SpinLock (Ring Buffer)
-template <typename T, std::size_t Capacity = 65536>
-class SPSCQueueSpinLock {
+// SPSC Queue templated on Lock type (Ring Buffer)
+template <typename T, typename Lock = SpinLock, std::size_t Capacity = 65536>
+class SPSCQueue {
     static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of 2");
     static constexpr std::size_t kMask = Capacity - 1;
 
@@ -32,10 +33,10 @@ private:
     std::size_t head_{0};
     std::size_t tail_{0};
     std::array<T, Capacity> buffer_{};
-    SpinLock lock_{};
+    Lock lock_{};
 
 public:
-    SPSCQueueSpinLock() = default;
+    SPSCQueue() = default;
 
     bool push(const T& item) {
         lock_.lock();
@@ -61,11 +62,24 @@ public:
         return true;
     }
 
-    std::size_t size() const {
-        return tail_ - head_;
+    std::size_t size() {
+        lock_.lock();
+        std::size_t s = tail_ - head_;
+        lock_.unlock();
+        return s;
     }
 
-    bool empty() const {
-        return head_ == tail_;
+    bool empty() {
+        lock_.lock();
+        bool e = (head_ == tail_);
+        lock_.unlock();
+        return e;
     }
 };
+
+// Aliases for convenience
+template <typename T, std::size_t Capacity = 65536>
+using SPSCQueueSpinLock = SPSCQueue<T, SpinLock, Capacity>;
+
+template <typename T, std::size_t Capacity = 65536>
+using SPSCQueueMutex = SPSCQueue<T, std::mutex, Capacity>;
